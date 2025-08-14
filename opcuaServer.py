@@ -2,7 +2,7 @@ import asyncio
 import logging
 import json
 import os
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, timezone
 
 from mqttt import MQTTChannel
 from opcuaHda import HistoryMongoDB, force_save_all_periodically
@@ -11,6 +11,7 @@ from asyncua.ua import ObjectIds, VariantType, Variant, LocalizedText
 import asyncua.ua as ua
 from dotenv import load_dotenv
 import uuid
+import traceback
 
 def callback_mqtt_message_handler(nos, client, topic, payload: bytes, qos, properties):
     try:
@@ -85,43 +86,31 @@ async def task_register_discovery(server: Server, registration_interval = 5):
 
 async def generate_event_properly(event_generator, event_type, message, severity, history_manager, **extra_props):
     try:
-        event_generator.event.EventId = ua.Variant(
-            uuid.uuid4().bytes, 
-            ua.VariantType.ByteString
-        )
-        event_generator.event.Time = ua.Variant(
-            datetime.now(), 
-            ua.VariantType.DateTime
-        )
-        event_generator.event.ReceiveTime = ua.Variant(
-            datetime.now(), 
-            ua.VariantType.DateTime
-        )
-        event_generator.event.Message = ua.Variant(
-            ua.LocalizedText(message), 
-            ua.VariantType.LocalizedText
-        )
-        event_generator.event.Severity = ua.Variant(
-            severity, 
-            ua.VariantType.UInt16
-        )
-        
-        for prop_name, prop_value in extra_props.items():
-            if hasattr(event_generator.event, prop_name):
-                if isinstance(prop_value, str):
-                    setattr(event_generator.event, prop_name, 
-                           ua.Variant(prop_value, ua.VariantType.String))
-                elif isinstance(prop_value, float):
-                    setattr(event_generator.event, prop_name, 
-                           ua.Variant(prop_value, ua.VariantType.Float))
-        
+        event_generator.event.EventId = ua.Variant(uuid.uuid4().bytes, ua.VariantType.ByteString)
+        event_generator.event.Time = ua.Variant(datetime.now(timezone.utc), ua.VariantType.DateTime)
+        event_generator.event.ReceiveTime = ua.Variant(datetime.now(timezone.utc), ua.VariantType.DateTime)
+        event_generator.event.Message = ua.Variant(ua.LocalizedText(message or ""), ua.VariantType.LocalizedText)
+        event_generator.event.Severity = ua.Variant(severity, ua.VariantType.UInt16)
+
+        for name, val in extra_props.items():
+            if hasattr(event_generator.event, name):
+                if isinstance(val, str):
+                    v = ua.Variant(val, ua.VariantType.String)
+                elif isinstance(val, bool):
+                    v = ua.Variant(val, ua.VariantType.Boolean)
+                elif isinstance(val, int):
+                    v = ua.Variant(val, ua.VariantType.Int32)
+                elif isinstance(val, float):
+                    v = ua.Variant(val, ua.VariantType.Float)
+                else:
+                    v = ua.Variant(str(val), ua.VariantType.String)
+                setattr(event_generator.event, name, v)
+
         await history_manager.save_event(event_generator.event)
-        
-        await event_generator.trigger()  
-        
+        await event_generator.trigger()
+
     except Exception as e:
         print(f"Erro ao gerar evento: {e}")
-        import traceback
         traceback.print_exc()
 
 async def check_voltage_events(nodes_variables, event_generator, history_manager):
@@ -218,7 +207,7 @@ async def configure_server_info(server: Server):
         product_name=os.getenv('OPCUA_PRODUCT_NAME'),
         software_version=os.getenv('OPCUA_SOFTWARE_VERSION'),
         build_number=os.getenv('OPCUA_BUILD_NUMBER'),
-        build_date=datetime.utcnow()
+        build_date=datetime.now(timezone.utc)
     )
 
     app_uri = os.getenv('OPCUA_APPLICATION_URI')
@@ -237,9 +226,9 @@ async def main():
     await configure_server_info(server)
 
 
-    history_manager = HistoryMongoDB(server)
-    server.iserver.history_manager = history_manager
-    await history_manager.init()  
+    storage = HistoryMongoDB(server)
+    await storage.init()
+    server.iserver.history_manager.set_storage(storage)
     
     canal_mqtt = await init_mqtt()
 
@@ -351,16 +340,16 @@ async def main():
         event_generator = None
 
 
-    asyncio.create_task(force_save_all_periodically(server, history_manager, nodes_variables))
+    asyncio.create_task(force_save_all_periodically(server, storage, nodes_variables))
     asyncio.create_task(task_register_discovery(server, registration_interval=10))
 
     count = 0
     try:
         while True:
             if count >= 5 and event_generator:  
-                await check_temperature_events(nodes_variables, event_generator, history_manager)
-                await check_voltage_events(nodes_variables, event_generator, history_manager)
-                await check_current_events(nodes_variables, event_generator, history_manager)
+                await check_temperature_events(nodes_variables, event_generator, storage)
+                await check_voltage_events(nodes_variables, event_generator, storage)
+                await check_current_events(nodes_variables, event_generator, storage)
                 count = 0
             else:
                 count += 1
@@ -370,7 +359,7 @@ async def main():
     except KeyboardInterrupt:
         print("\nParando servidor")
     finally:
-        await history_manager.stop()
+        await storage.stop()
         await server.stop()
         print("Servidor parado")
 

@@ -3,13 +3,14 @@ import asyncio
 import pymongo
 import os
 import uuid
+import traceback
 
 from typing import List, Tuple, Union
 from asyncua.server.history import HistoryStorageInterface
 from asyncua.ua import NodeId, DataValue, Variant, VariantType, LocalizedText
 from asyncua.server import Server
 from asyncua.common.events import Event
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, timezone
 from asyncua.ua import HistoryReadResult, HistoryData
 
 from dotenv import load_dotenv
@@ -17,6 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class HistoryMongoDB(HistoryStorageInterface):
+
     def __init__(self, server: Server, max_history_data_response_size=10000):
         mongo_uri = os.getenv('MONGO_URI')
         self.connection = pymongo.AsyncMongoClient(mongo_uri)
@@ -33,14 +35,22 @@ class HistoryMongoDB(HistoryStorageInterface):
         parent_name = (await parent.read_browse_name()).Name
 
         return f'{parent_name}_{node_name}'
+    
+    @staticmethod
+    def _nodeid_to_bson(nid: ua.NodeId) -> dict:
+        return {"ns": nid.NamespaceIndex, "id": nid.Identifier, "t": int(nid.NodeIdType)}
+
+    @staticmethod
+    def _nodeid_from_bson(d: dict) -> ua.NodeId:
+        return ua.NodeId(d["id"], d["ns"], ua.NodeIdType(d["t"]))
 
     @staticmethod
     def datavalue_to_dict(datavalue: DataValue):
         return {
             'variant': datavalue.Value.VariantType.value if datavalue.Value else VariantType.Null.value,
-            'timestamp': datavalue.SourceTimestamp if isinstance(datavalue.SourceTimestamp, datetime) else datetime.now(),
+            'timestamp': datavalue.SourceTimestamp if isinstance(datavalue.SourceTimestamp, datetime) else datetime.now(timezone.utc),
             'value': datavalue.Value.Value if datavalue.Value else None,
-            'server_timestamp': datavalue.ServerTimestamp if isinstance(datavalue.ServerTimestamp, datetime) else datetime.now()
+            'server_timestamp': datavalue.ServerTimestamp if isinstance(datavalue.ServerTimestamp, datetime) else datetime.now(timezone.utc)
         }
     
     @staticmethod
@@ -52,142 +62,148 @@ class HistoryMongoDB(HistoryStorageInterface):
             )
             
             timestamp = data.get('timestamp')
-            if not isinstance(timestamp, datetime):
-                timestamp = datetime.now()
+            if not isinstance(timestamp, datetime) or timestamp.tzinfo is None:
+                timestamp = datetime.now(timezone.utc)
                 
             server_timestamp = data.get('server_timestamp')
-            if not isinstance(server_timestamp, datetime):
-                server_timestamp = datetime.now()
+            if not isinstance(server_timestamp, datetime) or server_timestamp.tzinfo is None:
+                server_timestamp = datetime.now(timezone.utc)
             
             return DataValue(variant, SourceTimestamp=timestamp, ServerTimestamp=server_timestamp)
         
         except Exception as e:
             print(f"Erro ao converter dict para DataValue: {e}")
             variant = Variant(Value=0.0, VariantType=VariantType.Double)
-            return DataValue(variant, SourceTimestamp=datetime.now(), ServerTimestamp=datetime.now())
+            return DataValue(variant, SourceTimestamp=datetime.now(timezone.utc), ServerTimestamp=datetime.now(timezone.utc))
         
     @staticmethod
     def event_to_dict(event: Event) -> dict:
-        fields = {}
-        try:
-            try:
-                if hasattr(event, 'EventId') and event.EventId is not None:
-                    if hasattr(event.EventId, 'Value') and event.EventId.Value is not None:
-                        fields['EventId'] = {"VariantType": VariantType.ByteString, "Value": event.EventId.Value}
-                    else:
-                        fields['EventId'] = {"VariantType": VariantType.ByteString, "Value": uuid.uuid4().bytes}
-                else:
-                    fields['EventId'] = {"VariantType": VariantType.ByteString, "Value": uuid.uuid4().bytes}
-            except:
-                fields['EventId'] = {"VariantType": VariantType.ByteString, "Value": uuid.uuid4().bytes}
-            
-            try:
-                if hasattr(event, 'Time') and event.Time is not None:
-                    if hasattr(event.Time, 'Value') and event.Time.Value is not None:
-                        fields['Time'] = {"VariantType": VariantType.DateTime, "Value": event.Time.Value}
-                    else:
-                        fields['Time'] = {"VariantType": VariantType.DateTime, "Value": datetime.now()}
-                else:
-                    fields['Time'] = {"VariantType": VariantType.DateTime, "Value": datetime.now()}
-            except:
-                fields['Time'] = {"VariantType": VariantType.DateTime, "Value": datetime.now()}
-            
-            try:
-                if hasattr(event, 'ReceiveTime') and event.ReceiveTime is not None:
-                    if hasattr(event.ReceiveTime, 'Value') and event.ReceiveTime.Value is not None:
-                        fields['ReceiveTime'] = {"VariantType": VariantType.DateTime, "Value": event.ReceiveTime.Value}
-                    else:
-                        fields['ReceiveTime'] = {"VariantType": VariantType.DateTime, "Value": datetime.now()}
-                else:
-                    fields['ReceiveTime'] = {"VariantType": VariantType.DateTime, "Value": datetime.now()}
-            except:
-                fields['ReceiveTime'] = {"VariantType": VariantType.DateTime, "Value": datetime.now()}
-            
-            try:
-                if hasattr(event, 'Message') and event.Message is not None:
-                    if hasattr(event.Message, 'Value') and event.Message.Value is not None:
-                        if hasattr(event.Message.Value, 'Text') and event.Message.Value.Text is not None:
-                            fields['Message'] = {"VariantType": VariantType.LocalizedText, "Value": event.Message.Value.Text}
-                        else:
-                            fields['Message'] = {"VariantType": VariantType.LocalizedText, "Value": "No text content"}
-                    else:
-                        fields['Message'] = {"VariantType": VariantType.LocalizedText, "Value": "No message value"}
-                else:
-                    fields['Message'] = {"VariantType": VariantType.LocalizedText, "Value": "No message attribute"}
-            except:
-                fields['Message'] = {"VariantType": VariantType.LocalizedText, "Value": "Message processing error"}
-            
-            try:
-                if hasattr(event, 'Severity') and event.Severity is not None:
-                    if hasattr(event.Severity, 'Value') and event.Severity.Value is not None:
-                        fields['Severity'] = {"VariantType": VariantType.UInt16, "Value": event.Severity.Value}
-                    else:
-                        fields['Severity'] = {"VariantType": VariantType.UInt16, "Value": 100}
-                else:
-                    fields['Severity'] = {"VariantType": VariantType.UInt16, "Value": 100}
-            except:
-                fields['Severity'] = {"VariantType": VariantType.UInt16, "Value": 100}
-                
-        except Exception as e:
-            print(f"Erro em event_to_dict: {e}")
-            fields = {
-                "EventId": {"VariantType": VariantType.ByteString, "Value": uuid.uuid4().bytes},
-                "Time": {"VariantType": VariantType.DateTime, "Value": datetime.now()},
-                "ReceiveTime": {"VariantType": VariantType.DateTime, "Value": datetime.now()},
-                "Message": {"VariantType": VariantType.LocalizedText, "Value": "Error processing event"},
-                "Severity": {"VariantType": VariantType.UInt16, "Value": 100}
-            }
-        
-        return fields
+        def _vt(vt): 
+            return int(ua.VariantType(vt))
 
-    @staticmethod  
+        out = {}
+        try:
+            v = getattr(event, "EventId", None)
+            val = getattr(v, "Value", None)
+            out["EventId"] = {"VariantType": _vt(ua.VariantType.ByteString),
+                            "Value": val if val is not None else uuid.uuid4().bytes}
+        except Exception:
+            out["EventId"] = {"VariantType": _vt(ua.VariantType.ByteString),
+                            "Value": uuid.uuid4().bytes}
+        try:
+            v = getattr(event, "EventType", None)
+            nid = getattr(v, "Value", None)
+            if nid is not None:
+                out["EventType"] = {"VariantType": _vt(ua.VariantType.NodeId),
+                                    "Value": HistoryMongoDB._nodeid_to_bson(nid)}
+        except Exception:
+            pass
+        try:
+            v = getattr(event, "SourceNode", None)
+            nid = getattr(v, "Value", None)
+            if nid is not None:
+                out["SourceNode"] = {"VariantType": _vt(ua.VariantType.NodeId),
+                                    "Value": HistoryMongoDB._nodeid_to_bson(nid)}
+        except Exception:
+            pass
+        try:
+            v = getattr(event, "SourceName", None)
+            val = getattr(v, "Value", None)
+            if val is not None:
+                out["SourceName"] = {"VariantType": _vt(ua.VariantType.String), "Value": val}
+        except Exception:
+            pass
+        for field in ("Time", "ReceiveTime"):
+            try:
+                v = getattr(event, field, None)
+                val = getattr(v, "Value", None)
+                if not isinstance(val, datetime):
+                    val = datetime.now(timezone.utc)
+                out[field] = {"VariantType": _vt(ua.VariantType.DateTime), "Value": val}
+            except Exception:
+                out[field] = {"VariantType": _vt(ua.VariantType.DateTime),
+                            "Value": datetime.now(timezone.utc)}
+        try:
+            v = getattr(event, "Message", None)
+            txt = ""
+            if v is not None:
+                lv = getattr(v, "Value", None)
+                txt = getattr(lv, "Text", None) or str(lv) or ""
+            out["Message"] = {"VariantType": _vt(ua.VariantType.LocalizedText), "Value": txt}
+        except Exception:
+            out["Message"] = {"VariantType": _vt(ua.VariantType.LocalizedText), "Value": ""}
+
+        try:
+            v = getattr(event, "Severity", None)
+            val = getattr(v, "Value", None)
+            if val is None:
+                val = 100
+            out["Severity"] = {"VariantType": _vt(ua.VariantType.UInt16), "Value": val}
+        except Exception:
+            out["Severity"] = {"VariantType": _vt(ua.VariantType.UInt16), "Value": 100}
+
+        return out
+    
+    @staticmethod
     def event_from_dict(data: dict) -> Event:
-        event = Event()
-        for field, value in data.items():
-            if field == '_id':
+        ev = Event()
+
+        def _vt(v):
+            return ua.VariantType(v) if isinstance(v, int) else ua.VariantType(int(v))
+
+        for k, meta in data.items():
+            if k == "_id":
                 continue
 
-            if field == "Message":
-                event.add_property(
-                    name=field,
-                    val=Variant(
-                        Value=LocalizedText(Text=value["Value"]),
-                        VariantType=VariantType(value["VariantType"])
-                    ),
-                    datatype=None
-                )
-                continue
+            vt  = meta.get("VariantType")
+            val = meta.get("Value")
 
-            event.add_property(
-                name=field,
-                val=Variant(
-                    Value=value["Value"],
-                    VariantType=VariantType(value["VariantType"])
-                ),
-                datatype=None
-            )
+            if k == "Message":
+                lt = LocalizedText(Text=(val or ""))
+                ev.add_property(k, Variant(lt, ua.VariantType.LocalizedText), None)
 
-        return event
+            elif k in ("EventType", "SourceNode"):
+                if isinstance(val, dict):
+                    nid = ua.NodeId(val.get("id"), val.get("ns"), ua.NodeIdType(val.get("t")))
+                    ev.add_property(k, Variant(nid, ua.VariantType.NodeId), None)
 
-    async def test_connection(self):
-        try:
-            await self.connection.admin.command('ping')
-            print(f"MongoDB conectado: {self.database_name}")
-        
-            db = self.connection[self.database_name]
-            collections = await db.list_collection_names()
-            if collections:
-                print(f"Colletions encontradas: {collections}")
+            elif k in ("Time", "ReceiveTime"):
+                if not isinstance(val, datetime):
+                    try:
+                        val = datetime.fromisoformat(val)
+                    except Exception:
+                        val = datetime.now(timezone.utc)
+                if val.tzinfo is None:
+                    val = val.replace(tzinfo=timezone.utc)
+                ev.add_property(k, Variant(val, ua.VariantType.DateTime), None)
+
+            elif k == "EventId":
+                if isinstance(val, str):
+                    try:
+                        val = bytes.fromhex(val)
+                    except Exception:
+                        val = uuid.uuid4().bytes
+                ev.add_property(k, Variant(val, ua.VariantType.ByteString), None)
+
+            elif k == "Severity":
+                try:
+                    sval = 100 if val is None else int(val)
+                except Exception:
+                    sval = 100
+                ev.add_property(k, Variant(sval, ua.VariantType.UInt16), None)
+
             else:
-                print("Nenhuma coleção ainda, criando automaticamente")
-            
-            return True
-        except Exception as e:
-            print(f"Erro MongoDB: {e}")
-            return False
+                try:
+                    ev.add_property(k, Variant(val, _vt(vt)), None)
+                except Exception:
+                    ev.add_property(k, Variant(str(val), ua.VariantType.String), None)
 
+        return ev
+
+    
     async def init(self):
-        await self.test_connection()
+        db = self.connection[self.database_name]
+        await db['events'].create_index('Time.Value', name='events_time_idx')
 
     async def stop(self):
         if self.connection:
@@ -271,81 +287,31 @@ class HistoryMongoDB(HistoryStorageInterface):
         except Exception as e:
             print(f"ERRO read_node_history: {e}")
             return [], None
-
-    async def read_history(self, params):
-        try:
-            results = []
-            
-            for node_to_read in params.NodesToRead:
-                result = HistoryReadResult()
-                
-                try:
-                    start_time = datetime.now() - timedelta(hours=2)  
-                    end_time = datetime.now()
-                    max_values = 100 
-                    
-                    if hasattr(params, 'ReadDetails') and params.ReadDetails:
-                        details = params.ReadDetails
-                        if hasattr(details, 'StartTime') and details.StartTime:
-                            start_time = details.StartTime
-                        if hasattr(details, 'EndTime') and details.EndTime:
-                            end_time = details.EndTime
-                        if hasattr(details, 'NumValuesPerNode') and details.NumValuesPerNode:
-                            max_values = min(details.NumValuesPerNode, 50)
-                    
-                    node_id = node_to_read.NodeId
-                    data_values, continuation = await self.read_node_history(
-                        node_id, start_time, end_time, max_values
-                    )
-
-                    if not data_values:
-                        history_data = HistoryData()
-                        history_data.DataValues = []
-                    else:
-                        history_data = HistoryData()
-                        history_data.DataValues = data_values
-                    
-                    result.StatusCode = ua.StatusCodes.Good
-                    result.HistoryData = history_data
-                    result.ContinuationPoint = None
-    
-                    
-                except Exception as e:
-                    print(f"Erro ao processar no {node_to_read.NodeId}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    
-                    result.StatusCode = ua.StatusCodes.BadNoData
-                    result.HistoryData = HistoryData()
-                    result.HistoryData.DataValues = []
-                    result.ContinuationPoint = None
-                
-                results.append(result)
-            
-            return results
-            
-        except Exception as e:
-            print(f"Erro crítico em read_history: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            results = []
-            for _ in params.NodesToRead:
-                result = HistoryReadResult()
-                result.StatusCode = ua.StatusCodes.BadInternalError
-                result.HistoryData = HistoryData()
-                result.HistoryData.DataValues = []
-                results.append(result)
-            return results
     
     async def new_historized_event(self, source_id, evtypes, period, count=0):
         print(f"new_historized_event: {source_id}, {evtypes}, {period}, {count}")
 
     async def save_event(self, event: Event):
         try:
+        
+            if (getattr(getattr(event, "Message", None), "Value", None) is None):
+                event.Message = ua.Variant(ua.LocalizedText(""), ua.VariantType.LocalizedText)
+            if (getattr(getattr(event, "Severity", None), "Value", None) is None):
+                event.Severity = ua.Variant(100, ua.VariantType.UInt16)
+
+            msg_lt = getattr(getattr(event, "Message", None), "Value", None)
+            msg_txt = getattr(msg_lt, "Text", "") if msg_lt else ""
+            sev_val = getattr(getattr(event, "Severity", None), "Value", 100) or 100
+            if msg_txt == "" and sev_val == 100:
+                return
+            
+            event.ReceiveTime = ua.Variant(datetime.now(timezone.utc), ua.VariantType.DateTime)
+            
             event_dict = self.event_to_dict(event)
+            print("EVENT_DICT:", event_dict)  
             db = self.connection[self.database_name]
             await db['events'].insert_one(event_dict)
+
         except Exception as e:
             print(f"ERRO save_event: {e}")
 
@@ -396,11 +362,10 @@ async def force_save_all_periodically(server, history_manager, nodes_variables):
                         node = nodes_variables[var_name]
                         current_value = await node.read_value()
                         
-                        from asyncua import ua
                         datavalue = ua.DataValue(
                             Value=ua.Variant(current_value, ua.VariantType.Double),
-                            SourceTimestamp=datetime.now(),
-                            ServerTimestamp=datetime.now()
+                                SourceTimestamp=datetime.now(timezone.utc),
+                                ServerTimestamp=datetime.now(timezone.utc)
                         )
                         
                         await history_manager.save_node_value(node.nodeid, datavalue)
