@@ -106,7 +106,7 @@ async def generate_event_properly(event_generator, event_type, message, severity
                     v = ua.Variant(str(val), ua.VariantType.String)
                 setattr(event_generator.event, name, v)
 
-        await history_manager.save_event(event_generator.event)
+        # await history_manager.save_event(event_generator.event)
         await event_generator.trigger()
 
     except Exception as e:
