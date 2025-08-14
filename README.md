@@ -41,7 +41,7 @@ SCGDI/
 ```bash
 git clone https://github.com/cawzkf/SCGDI.git
 pip install -r requirements.txt
-
+```
 
 ### Conexão MQTT
 - Host: `lse.dev.br`  
@@ -91,13 +91,7 @@ Eventos são gravados no MongoDB e podem ser lidos no UaExpert (aba *Events*).
   - Vibração Axial e Radial  
 - Histórico de eventos gravado em coleção `events` no MongoDB  
 
----
 
-## Instalação
-```bash
-git clone https://github.com/cawzkf/SCGDI.git
-cd SCGDI
-```
 
 ---
 
