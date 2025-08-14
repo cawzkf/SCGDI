@@ -62,12 +62,20 @@ class HistoryMongoDB(HistoryStorageInterface):
             )
             
             timestamp = data.get('timestamp')
-            if not isinstance(timestamp, datetime) or timestamp.tzinfo is None:
+            if isinstance(timestamp, str):
+                timestamp = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            elif not isinstance(timestamp, datetime):
                 timestamp = datetime.now(timezone.utc)
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
                 
             server_timestamp = data.get('server_timestamp')
-            if not isinstance(server_timestamp, datetime) or server_timestamp.tzinfo is None:
+            if isinstance(server_timestamp, str):
+                server_timestamp = datetime.fromisoformat(server_timestamp.replace('Z', '+00:00'))
+            elif not isinstance(server_timestamp, datetime):
                 server_timestamp = datetime.now(timezone.utc)
+            if server_timestamp.tzinfo is None:
+                server_timestamp = server_timestamp.replace(tzinfo=timezone.utc)
             
             return DataValue(variant, SourceTimestamp=timestamp, ServerTimestamp=server_timestamp)
         
@@ -75,7 +83,7 @@ class HistoryMongoDB(HistoryStorageInterface):
             print(f"Erro ao converter dict para DataValue: {e}")
             variant = Variant(Value=0.0, VariantType=VariantType.Double)
             return DataValue(variant, SourceTimestamp=datetime.now(timezone.utc), ServerTimestamp=datetime.now(timezone.utc))
-        
+    
     @staticmethod
     def event_to_dict(event: Event) -> dict:
         def _vt(vt): 
