@@ -1,0 +1,4 @@
+asyncua
+gmqtt
+pymongo
+python-dotenv
